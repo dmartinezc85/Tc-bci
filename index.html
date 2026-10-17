@@ -1187,11 +1187,94 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
    * @param {object} data { statements, movements, snapshots, settings, rules, overrides }
    * @param {string} asOf fecha de referencia ISO (normalmente hoy)
    */
+
+  /* ------------- Compras no facturadas en cuotas (forma de pago elegida por ti) ------------- */
+  E.nfKey = function (m) {
+    return 'nf:' + U.fnv([E.cleanDesc(m.desc, m.lugar), m.fecha, Math.abs(m.montoOp != null ? m.montoOp : m.monto)].join('|'));
+  };
+  /** Cuota fija (sistema francés) con interés mensual en %; 0 = sin interés. */
+  E.cuotaCalc = function (monto, n, tasaMensual) {
+    n = Math.max(1, Math.round(+n || 1));
+    var P = Math.round(Math.abs(+monto || 0)), i = (+tasaMensual || 0) / 100;
+    var valor = Math.round(i > 0 ? P * i / (1 - Math.pow(1 + i, -n)) : P / n);
+    var total = valor * n;
+    return { n: n, tasa: +tasaMensual || 0, valor: valor, total: total, interes: Math.max(0, total - P), principal: P };
+  };
+  E.cuotaTexto = function (c) {
+    return c.n + ' cuotas de ' + U.clp(c.valor) + ' · total ' + U.clp(c.total) +
+      (c.tasa > 0 ? ' · intereses ' + U.clp(c.interes) + ' (' + U.pct(c.tasa, 2) + ' mensual)' : ' · sin interés');
+  };
+  /** Suma n meses a una fecha ISO, manteniendo el día (o el último día del mes). */
+  E.addMonthsDate = function (iso, n) {
+    var mk = U.addMonthsKey(U.monthKey(iso), n);
+    var d = Math.min(+iso.slice(8, 10), +U.monthEnd(mk).slice(8, 10));
+    return mk + '-' + U.pad2(d);
+  };
+  function attachNF(movs, set) {
+    var plans = (set && set.nfPlans) || {};
+    movs.forEach(function (m) {
+      if (m.estado !== 'no_facturado' || m.tipo !== 'compra' || !(m.monto > 0)) return;
+      var pl = plans[E.nfKey(m)];
+      if (pl && pl.n > 1) { m.nfPlan = E.cuotaCalc(m.monto, pl.n, pl.tasa); m.nfKey = E.nfKey(m); }
+    });
+  }
+
+  /** Eventos que cuentan en el PRESUPUESTO: una cuota por mes (no el total de la compra). */
+  function buildBudgetEv(M) {
+    var out = [], cov = M.coverage.desde;
+    function ev(base, fecha, monto, estado, extra) {
+      return Object.assign({
+        fecha: fecha, monto: monto, cat: base.cat, brand: base.brand, tipo: 'compra', estado: estado, deuda: base.deuda,
+        parcial: !!(cov && fecha < cov), id: base.id, desc: base.desc, lugar: base.lugar, tarjeta: base.tarjeta, stmt: base.stmt
+      }, extra || {});
+    }
+    M.movs.forEach(function (m) {
+      if (m.tipo !== 'compra' && m.tipo !== 'cargo' && m.tipo !== 'devolucion') return;
+      if (m.nfPlan) {
+        for (var k = 1; k <= m.nfPlan.n; k++) {
+          out.push(ev(m, E.addMonthsDate(m.fecha, k - 1), m.nfPlan.valor, k === 1 ? 'no_facturado' : 'por_facturar', { cuota: k, de: m.nfPlan.n }));
+        }
+      } else {
+        out.push(ev(m, m.fecha, m.monto, m.estado === 'facturado' ? 'facturado' : 'no_facturado'));
+      }
+    });
+    M.plans.forEach(function (p) {
+      var base = { cat: p.cat, brand: p.brand, deuda: p.deuda, id: p.movId, desc: p.desc, lugar: p.lugar, tarjeta: p.tarjeta, stmt: p.lastStmt };
+      (p.occ || []).forEach(function (o) {
+        if (!(o.n >= 1)) return;
+        var st = M.stmts.filter(function (x) { return x.id === o.stmt; })[0];
+        out.push(ev(base, st && st.hasta ? st.hasta : p.fecha, o.valor, 'facturado', { cuota: o.n, de: p.N }));
+      });
+      if (p.estado === 'vigente' || p.estado === 'nueva') {
+        var ls = M.stmts.filter(function (x) { return x.id === p.lastStmt; })[0], origen = ls && ls.hasta ? ls.hasta : p.fecha;
+        for (var j = 1; j <= p.pendientes; j++) {
+          out.push(ev(base, E.addMonthsDate(origen, j), p.valor, 'por_facturar', { cuota: p.lastN + j, de: p.N }));
+        }
+      }
+    });
+    out.sort(function (a, b) { return a.fecha < b.fecha ? 1 : a.fecha > b.fecha ? -1 : 0; });
+    M.budgetEv = out;
+  }
+
+  /** Gasto para presupuesto en un rango (misma regla de deuda y de tramo parcial que spendIn). */
+  E.budgetIn = function (M, from, to, opts) {
+    opts = opts || {};
+    var inclDeuda = opts.includeDebt != null ? opts.includeDebt : (M.settings.includeDebtPayments !== false);
+    return (M.budgetEv || []).filter(function (e) {
+      if (from && e.fecha < from) return false;
+      if (to && e.fecha > to) return false;
+      if (!inclDeuda && e.deuda) return false;
+      if (e.parcial) return false;
+      return true;
+    });
+  };
+
   E.buildModel = function (data, asOf) {
     var set = data.settings || {};
     E.setCustomCats(set.customCats);
     var stmts = (data.statements || []).slice().sort(stmtSort);
     var movs = (data.movements || []).map(function (m) { return E.categorize(Object.assign({}, m), data.rules, data.overrides); });
+    attachNF(movs, set);
     movs.sort(function (a, b) { return a.fecha < b.fecha ? 1 : a.fecha > b.fecha ? -1 : 0; });
     var M = { asOf: asOf, settings: set, stmts: stmts, movs: movs, snapshots: data.snapshots || [] };
     M.latest = stmts.length ? stmts[stmts.length - 1] : null;
@@ -1314,6 +1397,7 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
     });
     ev.sort(function (a, b) { return a.fecha < b.fecha ? 1 : a.fecha > b.fecha ? -1 : 0; });
     M.spend = ev;
+    buildBudgetEv(M);
   }
 
   /** Eventos de gasto dentro de un rango, aplicando las opciones del usuario. */
@@ -1407,7 +1491,7 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
   /** Estado del presupuesto de un período: gastado vs presupuesto por categoría, disponible y ritmo. */
   E.budgetStatus = function (M, per, budgets, estado) {
     budgets = budgets || {};
-    var all = E.spendIn(M, per.from, per.to);
+    var all = E.budgetIn(M, per.from, per.to);
     var evs = estado === 'facturado' ? all.filter(function (e) { return e.estado === 'facturado'; }) : estado === 'no' ? all.filter(function (e) { return e.estado !== 'facturado'; }) : all;
     var byF = E.sumBy(all.filter(function (e) { return e.estado === 'facturado'; }), function (e) { return e.cat; });
     var byN = E.sumBy(all.filter(function (e) { return e.estado !== 'facturado'; }), function (e) { return e.cat; });
@@ -1529,7 +1613,20 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
         if (p.tasa > 0) totalConInteres += p.valor * p.pendientes;
       }
     });
+    M.movs.forEach(function (m) {
+      if (!m.nfPlan || m.estado !== 'no_facturado') return;
+      var pl = m.nfPlan;
+      totalFuturo += pl.valor * (pl.n - 1);
+      if (pl.tasa > 0) totalConInteres += pl.valor * (pl.n - 1);
+      for (var k = 1; k <= pl.n && k <= N; k++) {
+        rows[k - 1].nfCuotas = (rows[k - 1].nfCuotas || 0) + pl.valor;
+        (rows[k - 1].nfItems = rows[k - 1].nfItems || []).push({ desc: m.desc, n: k, N: pl.n, valor: pl.valor });
+      }
+    });
     var interesFuturo = 0;
+    M.movs.forEach(function (m) {
+      if (m.nfPlan && m.estado === 'no_facturado') interesFuturo += m.nfPlan.interes * ((m.nfPlan.n - 1) / m.nfPlan.n);
+    });
     M.plans.forEach(function (p) {
       if ((p.estado === 'vigente' || p.estado === 'nueva') && p.tasa > 0 && p.N > 0) interesFuturo += p.interes * (p.pendientes / p.N);
     });
@@ -1577,10 +1674,10 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
     out.comp.push({ id: 'cuotas', label: 'Cuotas de compras anteriores', monto: cuotas1, conf: 'dato', nota: 'Suma exacta de las cuotas que vencen en el próximo estado (coincide con la cifra del banco: ' + (M.projection && M.projection.meses[0].banco != null ? U.clp(M.projection.meses[0].banco) : 's/d') + ')' });
     // 3) Compras no facturadas
     var nf = M.unbilled.filter(function (m) { return m.tipo === 'compra' || m.tipo === 'devolucion' || m.tipo === 'cargo'; });
-    var nfTotal = U.sum(nf, function (m) { return m.monto; });
+    var nfTotal = U.sum(nf, function (m) { return m.nfPlan ? m.nfPlan.valor : m.monto; });
     var nfFechas = nf.map(function (m) { return m.fecha; }).sort();
     out.corteNoFact = nfFechas.length ? nfFechas[nfFechas.length - 1] : null;
-    out.comp.push({ id: 'nofact', label: 'Compras no facturadas (' + nf.length + ')', monto: nfTotal, conf: 'parcial', nota: 'Movimientos hasta el ' + (out.corteNoFact ? U.fmtDate(out.corteNoFact) : '—') + '. Se asumen en 1 cuota; si pasas alguna a cuotas, el pago baja.' });
+    out.comp.push({ id: 'nofact', label: 'Compras no facturadas (' + nf.length + ')', monto: nfTotal, conf: 'parcial', nota: 'Movimientos hasta el ' + (out.corteNoFact ? U.fmtDate(out.corteNoFact) : '—') + '. Las compras a 1 pago se asumen en 1 cuota; las que tienen plan de cuotas aportan solo su 1ª cuota.' });
     // 4) Cargos del estado
     var comisiones = M.stmts.map(function (s) { return U.sum(M.movs.filter(function (m) { return m.stmt === s.id && m.tipo === 'comision'; }), function (m) { return m.monto; }); });
     var impuestos = M.stmts.map(function (s) { return U.sum(M.movs.filter(function (m) { return m.stmt === s.id && m.tipo === 'impuesto'; }), function (m) { return m.monto; }); });
@@ -3175,11 +3272,29 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
     if (r.kind === 'mov' && r.montoOp != null && r.montoOp !== r.monto) kv.push(['Monto de la operación completa', $(r.montoOp)]);
     if (plan) kv.push(['Compra en cuotas', plan.N + ' cuotas de ' + U.clp(plan.valor) + ' · total ' + U.clp(plan.montoTotal) + (plan.tasa > 0 ? ' · tasa ' + U.pct(plan.tasa, 2) + ' mensual' : ' · sin interés')]);
     if (plan) kv.push(['Cuotas facturadas', plan.facturadas + ' de ' + plan.N + ' (' + (plan.estado === 'prepagado' ? 'prepagada' : plan.estado === 'terminado' ? 'terminada' : plan.pendientes + ' por facturar') + ')']);
+    if (mov && mov.nfPlan) kv.push(['Forma de pago', U.esc(E.cuotaTexto(mov.nfPlan))]);
     kv.push(['Facturación', U.esc(estadoTxt)]); kv.push(['Estado de pago', U.esc(p.t)]);
     kv.push(['Tarjeta', r.tarjeta ? '···' + r.tarjeta + (r.tarjeta === '1568' ? ' (adicional)' : '') : '—']);
     if (r.codigo) kv.push(['Código de referencia', U.esc(r.codigo)]);
     kv.push(['Archivo de origen', U.esc(r.file || '—')]);
     var h = '<div class="kv">' + kv.map(function (x) { return '<div><span>' + x[0] + '</span><b>' + x[1] + '</b></div>'; }).join('') + '</div>';
+    if (mov && mov.estado === 'no_facturado' && mov.tipo === 'compra' && mov.monto > 0) {
+      var nfp = mov.nfPlan, curN = nfp ? nfp.n : (mov.cuotasAviso > 1 ? mov.cuotasAviso : 3), curT = nfp ? nfp.tasa : 0;
+      var enCuotas = !!nfp || mov.cuotasAviso > 1;
+      var prev = E.cuotaCalc(mov.monto, curN, curT);
+      h += '<h3 style="margin:14px 0 6px">Pago único o en cuotas</h3><div class="filters" style="grid-template-columns:1fr">' +
+        '<label class="field"><span>¿Pago único o en cuotas?</span><select id="nf-mode" data-act="nfmode">' +
+        '<option value="unico"' + (enCuotas ? '' : ' selected') + '>Pago único</option>' +
+        '<option value="cuotas"' + (enCuotas ? ' selected' : '') + '>En cuotas</option></select></label>' +
+        '<div id="nf-box" style="display:' + (enCuotas ? 'block' : 'none') + '">' +
+        '<div class="filters" style="grid-template-columns:1fr 1fr;gap:8px">' +
+        '<label class="field"><span>N° de cuotas</span><input id="nf-n" type="number" inputmode="numeric" min="2" max="48" step="1" data-input="nfpreview" value="' + curN + '"></label>' +
+        '<label class="field"><span>Interés mensual (%)</span><input id="nf-t" type="text" inputmode="decimal" autocomplete="off" data-input="nfpreview" value="' + String(curT).replace('.', ',') + '"></label></div>' +
+        '<p class="sub" style="margin:4px 0 0">0 = sin interés. Con interés, la cuota es fija (sistema francés).</p>' +
+        '<div class="note" id="nf-prev" style="margin-top:8px">' + U.esc(E.cuotaTexto(prev)) + '</div></div></div>' +
+        '<div class="btn-row"><button class="btn primary" data-act="nfsave" data-k="' + U.esc(E.nfKey(mov)) + '" data-m="' + Math.abs(mov.monto) + '">Guardar forma de pago</button></div>' +
+        '<p class="sub" style="margin-top:6px">En Presupuesto cuenta solo el valor de cada cuota, en cada mes que corresponde.</p>';
+    }
     var nk = E.noteKey(r), note = ((S.notes || {})[nk]) || '';
     h += '<h3 style="margin:14px 0 6px">Comentario</h3><label class="field"><span>Tu nota sobre este movimiento' + (r.plan ? ' (vale para todas las cuotas de la compra)' : '') + '</span><textarea id="note-txt" maxlength="500" placeholder="Ej.: regalo de cumpleaños, compartido con…">' + U.esc(note) + '</textarea></label>' +
       '<div class="btn-row" style="margin-top:8px"><button class="btn primary" data-act="savenote" data-k="' + U.esc(nk) + '">Guardar comentario</button>' + (note ? '<button class="btn" data-act="delnote" data-k="' + U.esc(nk) + '">Borrar comentario</button>' : '') + '</div>';
@@ -3674,7 +3789,7 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
       '<li>El “próximo pago” y el vencimiento futuro son estimaciones con tus propios datos; el banco no entrega esas cifras por adelantado.</li>' +
       '<li>Las compras no facturadas se asumen en 1 cuota: el listado del banco no indica si se pasaron a cuotas.</li>' +
       '<li>Las categorías son una clasificación automática por nombre de comercio; corrígelas cuando quieras.</li>' +
-      '<li>Funciona sin internet. Nada se envía a servidores; la única conexión es la sincronización opcional con tu propio script de Google (solo si la configuras).</li></ul><p class="sub">Versión 1.0 · datos solo locales.</p></section>';
+      '<li>Funciona sin internet. Nada se envía a servidores; la única conexión es la sincronización opcional con tu propio script de Google (solo si la configuras).</li></ul><p class="sub">Versión 1.1 · pago único o en cuotas · datos solo locales.</p></section>';
     UI.after(function () {
       var inp = UI.q('#bk-in'); if (inp) inp.addEventListener('change', function () { if (inp.files[0]) UI.restoreFile(inp.files[0]); inp.value = ''; });
       St.estimate().then(function (e) { var n = UI.q('#storage-use'); if (n) n.textContent = e && e.usage != null ? (e.usage / 1024 / 1024).toFixed(2) + ' MB de ' + (e.quota ? Math.round(e.quota / 1024 / 1024) + ' MB' : '—') : 'no disponible'; });
@@ -4212,6 +4327,43 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
   document.addEventListener('visibilitychange', function () { if (document.visibilityState === 'visible') auto(5); });
 })(typeof window !== 'undefined' ? window : globalThis);
 
+
+/* ---------- 62-nf-ui.js ---------- */
+/* Forma de pago de compras no facturadas: pago único o en cuotas (con o sin interés mensual). */
+(function (g) {
+  'use strict';
+  var BCI = g.BCI;
+  if (!BCI || !BCI.ui) return;
+  var E = BCI.engine, UI = BCI.ui;
+  function leer(sh) {
+    return {
+      modo: UI.q('#nf-mode', sh).value,
+      n: parseInt(UI.q('#nf-n', sh).value, 10),
+      t: parseFloat(String(UI.q('#nf-t', sh).value).replace(',', '.'))
+    };
+  }
+  function valido(f) { return f.n >= 2 && f.n <= 48 && f.t >= 0 && f.t <= 15; }
+  UI.acts.nfmode = function (el) {
+    var sh = el.closest('.sheet');
+    UI.q('#nf-box', sh).style.display = el.value === 'cuotas' ? 'block' : 'none';
+  };
+  UI.acts.nfpreview = function (el) {
+    var sh = el.closest('.sheet'), f = leer(sh), out = UI.q('#nf-prev', sh);
+    var m = Number(UI.q('[data-act=nfsave]', sh).getAttribute('data-m'));
+    out.textContent = valido(f) ? E.cuotaTexto(E.cuotaCalc(m, f.n, f.t)) : 'Revisa: de 2 a 48 cuotas, e interés entre 0 y 15 %.';
+  };
+  UI.acts.nfsave = function (el) {
+    var sh = el.closest('.sheet'), f = leer(sh), key = el.getAttribute('data-k');
+    var d = UI.state.data, plans = Object.assign({}, (d.settings && d.settings.nfPlans) || {});
+    if (f.modo === 'unico') delete plans[key];
+    else {
+      if (!valido(f)) { UI.toast('Revisa: de 2 a 48 cuotas, e interés entre 0 y 15 %.', 'err'); return; }
+      plans[key] = { n: f.n, tasa: Math.round(f.t * 100) / 100 };
+    }
+    UI.patchSettings({ nfPlans: plans }, f.modo === 'unico' ? 'Marcado como pago único.' : 'Forma de pago guardada.')
+      .then(function () { sh.parentNode.close(); }, function () {});
+  };
+})(typeof window !== 'undefined' ? window : globalThis);
 
 /* ---------- 90-main.js ---------- */
 /* =====================================================================
