@@ -1210,6 +1210,17 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
     var d = Math.min(+iso.slice(8, 10), +U.monthEnd(mk).slice(8, 10));
     return mk + '-' + U.pad2(d);
   };
+  /** Compras no facturadas en cuotas, con la misma forma que los planes de cuotas facturadas. */
+  E.nfPlans = function (M) {
+    return M.movs.filter(function (m) { return m.nfPlan && m.estado === 'no_facturado'; }).map(function (m) {
+      return {
+        key: m.nfKey, nf: true, fecha: m.fecha, desc: m.desc, lugar: m.lugar, brand: m.brand, cat: m.cat, fp: m.fp,
+        montoTotal: m.monto, N: m.nfPlan.n, tasa: m.nfPlan.tasa, valor: m.nfPlan.valor, interes: m.nfPlan.interes,
+        facturadas: 0, pendientes: m.nfPlan.n, lastN: 0, estado: 'no_facturado', movId: m.id,
+        tarjeta: m.tarjeta, deuda: m.deuda, sug: m.sug, sugerida: m.sugerida, stmt: null, occ: []
+      };
+    });
+  };
   function attachNF(movs, set) {
     var plans = (set && set.nfPlans) || {};
     movs.forEach(function (m) {
@@ -1525,7 +1536,7 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
   E.budgetSuggest = function (M) {
     var ms = E.monthlySpend(M).filter(function (m) { return !m.parcial; }).slice(-3), out = {};
     E.BUDGET_CATS.forEach(function (c) {
-      var v = ms.length ? U.sum(ms, function (m) { return m.porCat[c] || 0; }) / ms.length : 0;
+      var v = ms.length ? U.sum(ms, function (m) { return U.sum(E.budgetIn(M, m.key + '-01', U.monthEnd(m.key)).filter(function (e) { return e.cat === c; }), function (e) { return e.monto; }); }) / ms.length : 0;
       out[c] = Math.max(0, Math.round(v / 1000) * 1000);
     });
     return { values: out, meses: ms.length };
@@ -3478,25 +3489,28 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
   };
 
   /* ================================ CUOTAS ================================= */
-  var PLAN_ESTADO = { vigente: ['Vigente', 'fut'], nueva: ['Nueva (1ª cuota próx.)', 'info'], terminado: ['Terminado', 'ok'], prepagado: ['Prepagado', 'ok'], cerrado_revisar: ['Revisar', 'warn'] };
+  var PLAN_ESTADO = { vigente: ['Vigente', 'fut'], nueva: ['Nueva (1ª cuota próx.)', 'info'], terminado: ['Terminado', 'ok'], prepagado: ['Prepagado', 'ok'], cerrado_revisar: ['Revisar', 'warn'], no_facturado: ['No facturada · en cuotas', 'info'] };
 
   UI.views.cuotas = function (M, S) {
     if (!M.latest) return UI.emptyState();
-    var pj = M.projection, f = S.planFilter, q = U.norm(S.planQ || '');
-    var vig = M.plans.filter(function (p) { return p.estado === 'vigente' || p.estado === 'nueva'; });
+    var pj = M.projection, f = S.planFilter, q = U.norm(S.planQ || ''), cat = S.planCat || '';
+    var todos = M.plans.concat(E.nfPlans(M));
+    var vig = todos.filter(function (p) { return p.estado === 'vigente' || p.estado === 'nueva' || p.estado === 'no_facturado'; });
     var conInt = vig.filter(function (p) { return p.tasa > 0; });
-    var rows = M.plans.filter(function (p) {
-      if (f === 'vigentes' && !(p.estado === 'vigente' || p.estado === 'nueva')) return false;
+    var rows = todos.filter(function (p) {
+      if (f === 'vigentes' && !(p.estado === 'vigente' || p.estado === 'nueva' || p.estado === 'no_facturado')) return false;
+      if (f === 'nofact' && p.estado !== 'no_facturado') return false;
+      if (cat && p.cat !== cat) return false;
       if (f === 'terminadas' && p.estado !== 'terminado') return false;
       if (f === 'prepagadas' && p.estado !== 'prepagado' && p.estado !== 'cerrado_revisar') return false;
       if (q && U.norm(p.brand + ' ' + p.desc).indexOf(q) < 0) return false;
       return true;
     });
     function pill(k, t, n) { return '<button class="pill" data-act="planf" data-k="' + k + '" aria-pressed="' + (f === k) + '">' + t + ' (' + n + ')</button>'; }
-    var cnt = { vigentes: vig.length, terminadas: M.plans.filter(function (p) { return p.estado === 'terminado'; }).length, prepagadas: M.plans.filter(function (p) { return p.estado === 'prepagado' || p.estado === 'cerrado_revisar'; }).length, todas: M.plans.length };
+    var cnt = { vigentes: vig.length, terminadas: M.plans.filter(function (p) { return p.estado === 'terminado'; }).length, prepagadas: M.plans.filter(function (p) { return p.estado === 'prepagado' || p.estado === 'cerrado_revisar'; }).length, todas: todos.length, nofact: todos.filter(function (p) { return p.estado === 'no_facturado'; }).length };
     var tbl = UI.table({
       id: 'plans', defaultSort: 'fecha', defaultDir: 'desc', minW: 960, cols_css: 'minmax(0,2fr) 88px 96px 84px 70px 92px 100px 60px 124px',
-      rows: rows, rowAttrs: function (p) { return 'data-act="plandetail" data-key="' + U.esc(p.key) + '" tabindex="0" role="row"'; },
+      rows: rows, rowAttrs: function (p) { return 'data-act="' + (p.nf ? 'nfplan' : 'plandetail') + '" data-key="' + U.esc(p.key) + '" tabindex="0" role="row"'; },
       cols: [
         { k: 'brand', label: 'Compra', p: true, sort: function (p) { return U.norm(p.brand); }, fmt: function (p) { return U.esc(p.brand) + '<span class="mv-sub">' + U.esc(p.desc.replace(/\s*TASA INT\.?\s*[\d,]+%/, '')) + '</span>'; } },
         { k: 'fecha', label: 'Fecha compra', sort: function (p) { return p.fecha; }, fmt: function (p) { return U.fmtDate(p.fecha); } },
@@ -3504,7 +3518,7 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
         { k: 'cuotas', label: 'Facturadas', sort: function (p) { return p.facturadas / p.N; }, fmt: function (p) { return p.facturadas + ' de ' + p.N; } },
         { k: 'pend', label: 'Pendientes', sm: true, sort: function (p) { return p.pendientes; }, fmt: function (p) { return p.pendientes; } },
         { k: 'valor', label: 'Valor cuota', r: true, sort: function (p) { return p.valor; }, fmt: function (p) { return $(p.valor); } },
-        { k: 'saldo', label: 'Saldo futuro', r: true, sort: function (p) { return (p.estado === 'vigente' || p.estado === 'nueva') ? p.valor * p.pendientes : 0; }, fmt: function (p) { return (p.estado === 'vigente' || p.estado === 'nueva') ? $(p.valor * p.pendientes) : '<span class="sub">—</span>'; } },
+        { k: 'saldo', label: 'Saldo futuro', r: true, sort: function (p) { return (p.estado === 'vigente' || p.estado === 'nueva' || p.estado === 'no_facturado') ? p.valor * p.pendientes : 0; }, fmt: function (p) { return (p.estado === 'vigente' || p.estado === 'nueva' || p.estado === 'no_facturado') ? $(p.valor * p.pendientes) : '<span class="sub">—</span>'; } },
         { k: 'tasa', label: 'Tasa', sm: true, sort: function (p) { return p.tasa || 0; }, fmt: function (p) { return p.tasa > 0 ? '<b style="color:var(--c-deuda)">' + U.pct(p.tasa, 2) + '</b>' : '0%'; } },
         { k: 'est', label: 'Estado', sort: function (p) { return p.estado; }, fmt: function (p) { var e = PLAN_ESTADO[p.estado]; return UI.chip(e[0], e[1]); } }
       ]
@@ -3512,23 +3526,30 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
     var html = UI.alertsHtml(M, ['planes_cerrados', 'faltan_x']) + '<div class="view-title"><h2>Cuotas y proyecciones</h2><div class="btn-row"><button class="btn sm" data-act="cuotasexport" data-f="xlsx">' + UI.icons.download + ' Excel</button><button class="btn sm" data-act="cuotasexport" data-f="csv">' + UI.icons.download + ' CSV</button></div></div>' +
       '<section class="kpis"><div class="kpi k-fut" style="cursor:default"><span class="k-l"><span>Saldo futuro en cuotas</span></span><span class="k-v money">' + U.clp(pj.totalFuturo) + '</span><span class="k-s">Valor nominal de las cuotas por facturar</span></div>' +
       '<div class="kpi k-fut" style="cursor:default"><span class="k-l"><span>Compras vigentes</span></span><span class="k-v">' + vig.length + '</span><span class="k-s">' + vig.reduce(function (a, p) { return a + p.pendientes; }, 0) + ' cuotas por facturar</span></div>' +
-      '<div class="kpi k-fut" style="cursor:default"><span class="k-l"><span>Próximo estado (' + U.monthLabel(pj.meses[0].key) + ')</span></span><span class="k-v money">' + U.clp(pj.meses[0].cuotas) + '</span><span class="k-s">Cuotas que se facturan el ' + U.fmtDateShort(pj.cierre.fecha) + '</span></div>' +
+      '<div class="kpi k-fut" style="cursor:default"><span class="k-l"><span>Próximo estado (' + U.monthLabel(pj.meses[0].key) + ')</span></span><span class="k-v money">' + U.clp(pj.meses[0].cuotas + (pj.meses[0].nfCuotas || 0)) + '</span><span class="k-s">Cuotas que se facturan el ' + U.fmtDateShort(pj.cierre.fecha) + '</span></div>' +
       '<div class="kpi k-bad" style="cursor:default;--kc:var(--k2)"><span class="k-l"><span>Con interés</span></span><span class="k-v">' + conInt.length + '</span><span class="k-s">' + (conInt.length ? 'Interés pendiente estimado ' + U.clp(pj.interesFuturoEst) : 'Todas tus cuotas vigentes son sin interés (0%)') + '</span></div></section>' +
       '<section class="card"><header><div><h2>Cuánto se factura cada mes por cuotas</h2><div class="sub">Calendario exacto: cada cuota va al estado del mes indicado. Los meses 5 y 6 no tienen cifra del banco (solo informa 4).</div></div></header><div id="c-proy2"></div></section>' +
       '<section class="card"><header><div><h2>Compras en cuotas</h2><div class="sub">Toca una compra para ver su calendario de cuotas</div></div></header>' +
-      '<div class="period" style="margin-bottom:6px">' + pill('vigentes', 'Vigentes', cnt.vigentes) + pill('terminadas', 'Terminadas', cnt.terminadas) + pill('prepagadas', 'Prepagadas / revisar', cnt.prepagadas) + pill('todas', 'Todas', cnt.todas) + '</div>' +
-      '<label class="field" style="margin-bottom:6px"><span>Buscar</span><input type="search" placeholder="Comercio…" value="' + U.esc(S.planQ) + '" data-input="planq"></label><div id="plans-tbl">' + tbl + '</div></section>';
+      '<div class="period" style="margin-bottom:6px">' + pill('vigentes', 'Vigentes', cnt.vigentes) + pill('nofact', 'No facturadas', cnt.nofact) + pill('terminadas', 'Terminadas', cnt.terminadas) + pill('prepagadas', 'Prepagadas / revisar', cnt.prepagadas) + pill('todas', 'Todas', cnt.todas) + '</div>' +
+      '<div class="filters" style="grid-template-columns:1fr 1fr;gap:8px;margin-bottom:6px"><label class="field"><span>Buscar</span><input type="search" placeholder="Comercio…" value="' + U.esc(S.planQ) + '" data-input="planq"></label>' +
+      '<label class="field"><span>Categoría</span><select data-act="plancat"><option value="">Todas</option>' + E.BUDGET_CATS.map(function (c) { return '<option' + (c === cat ? ' selected' : '') + '>' + U.esc(c) + '</option>'; }).join('') + '</select></label></div><div id="plans-tbl">' + tbl + '</div></section>';
     UI.after(function () {
       var pm = pj.meses;
       Ch.bars(UI.q('#c-proy2'), {
         label: 'Cuotas por estado', cats: pm.map(function (m) { return U.monthLabel(m.key); }), catLong: function (i) { return 'Estado de ' + U.monthLabel(pm[i].key, true); }, mode: 'grouped', catTitle: 'Estado',
-        series: [{ name: 'Cuotas a facturar (calculado)', color: 'var(--c-futuro)', pattern: 'hatch', values: pm.map(function (m) { return m.cuotas; }) }, { name: 'Cifra informada por el banco', color: 'var(--c-fact)', values: pm.map(function (m) { return m.banco; }) }],
+        series: [{ name: 'Cuotas a facturar (calculado)', color: 'var(--c-futuro)', pattern: 'hatch', values: pm.map(function (m) { return m.cuotas; }) }, { name: 'Compras no facturadas en cuotas (calculado)', color: 'var(--c-deuda)', pattern: 'hatch', values: pm.map(function (m) { return m.nfCuotas || 0; }) }, { name: 'Cifra informada por el banco', color: 'var(--c-fact)', values: pm.map(function (m) { return m.banco; }) }],
         tipExtra: function (i) { var it = pm[i].items; return it.length ? '<small>' + it.length + ' compras: ' + U.esc(it.slice(0, 3).map(function (x) { return x.brand; }).join(', ')) + (it.length > 3 ? '…' : '') + '</small>' : ''; }
       });
     });
     return html;
   };
 
+  UI.acts.plancat = function (el) { UI.state.planCat = el.value; UI.keepScroll(); UI.rerender(); };
+  UI.acts.nfplan = function (el) {
+    var M = UI.state.model, k = el.getAttribute('data-key');
+    var mv = M.movs.filter(function (m) { return m.nfKey === k; })[0];
+    if (mv) UI.movSheet(Object.assign({ kind: 'mov' }, mv));
+  };
   UI.acts.planf = function (el) { UI.state.planFilter = el.getAttribute('data-k'); UI.keepScroll(); UI.rerender(); };
   UI.acts.planq = U.debounce(function (el) { UI.state.planQ = el.value; UI.keepScroll(); var pos = el.selectionStart; UI.rerender(); var n = UI.q('[data-input="planq"]'); if (n) { n.focus(); try { n.setSelectionRange(pos, pos); } catch (e) { /* noop */ } } }, 220);
 
@@ -3547,7 +3568,7 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
       rowsH += '<tr><td>' + n + '/' + p.N + '</td><td>' + mes + '</td><td class="num">' + (oc ? $(oc.valor) : (p.estado === 'prepagado' ? '' : n > p.lastN ? $(p.valor) : '')) + '</td><td>' + estado + '</td></tr>';
     }
     var kv = [['Comercio', U.esc(p.brand)], ['Descripción original', U.esc(p.desc)], ['Fecha de compra', U.fmtDate(p.fecha)], ['Monto total de la compra', $(p.montoTotal)], ['Número de cuotas', p.N], ['Valor de cada cuota', $(p.valor)],
-      ['Cuotas facturadas', p.facturadas + ' de ' + p.N], ['Cuotas pendientes', p.estado === 'prepagado' ? '0 (prepagada)' : p.pendientes], ['Saldo futuro comprometido', (p.estado === 'vigente' || p.estado === 'nueva') ? $(p.valor * p.pendientes) : '$0'], ['Tasa de interés', p.tasa > 0 ? U.pct(p.tasa, 2) + ' mensual' : '0% (sin interés)']];
+      ['Cuotas facturadas', p.facturadas + ' de ' + p.N], ['Cuotas pendientes', p.estado === 'prepagado' ? '0 (prepagada)' : p.pendientes], ['Saldo futuro comprometido', (p.estado === 'vigente' || p.estado === 'nueva' || p.estado === 'no_facturado') ? $(p.valor * p.pendientes) : '$0'], ['Tasa de interés', p.tasa > 0 ? U.pct(p.tasa, 2) + ' mensual' : '0% (sin interés)']];
     if (p.interes > 0) kv.push(['Interés total de la compra', $(p.interes) + ' (' + p.N + ' × ' + U.clp(p.valor) + ' − ' + U.clp(p.montoTotal) + ')']);
     if (p.prepago) kv.push(['Prepago', $(p.prepago.monto) + ' el ' + U.fmtDate(p.prepago.fecha)]);
     var h = '<div class="kv">' + kv.map(function (x) { return '<div><span>' + x[0] + '</span><b>' + x[1] + '</b></div>'; }).join('') + '</div>' +
@@ -3561,7 +3582,7 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
   UI.acts.cuotasexport = function (el) {
     var M = UI.state.model, pj = M.projection;
     var header = ['Comercio', 'Descripción original', 'Fecha de compra', 'Monto total', 'Cuotas totales', 'Cuotas facturadas', 'Cuotas pendientes', 'Valor cuota', 'Saldo futuro', 'Tasa mensual (%)', 'Estado'];
-    var rows = M.plans.map(function (p) { return [p.brand, p.desc, U.fmtDate(p.fecha), p.montoTotal, p.N, p.facturadas, p.estado === 'prepagado' ? 0 : p.pendientes, p.valor, (p.estado === 'vigente' || p.estado === 'nueva') ? p.valor * p.pendientes : 0, p.tasa || 0, PLAN_ESTADO[p.estado][0]]; });
+    var rows = M.plans.map(function (p) { return [p.brand, p.desc, U.fmtDate(p.fecha), p.montoTotal, p.N, p.facturadas, p.estado === 'prepagado' ? 0 : p.pendientes, p.valor, (p.estado === 'vigente' || p.estado === 'nueva' || p.estado === 'no_facturado') ? p.valor * p.pendientes : 0, p.tasa || 0, PLAN_ESTADO[p.estado][0]]; });
     if (el.getAttribute('data-f') === 'csv') return UI.exportRows('cuotas-' + UI.today(), header, rows, 'csv');
     UI.exportBook('cuotas-' + UI.today(), [{ name: 'Compras en cuotas', header: header, rows: rows }, { name: 'Proyección', header: ['Estado', 'Cuotas a facturar', 'Cifra del banco'], rows: pj.meses.map(function (m) { return [U.monthLabel(m.key, true), m.cuotas, m.banco == null ? '' : m.banco]; }) }]);
   };
@@ -3789,7 +3810,7 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
       '<li>El “próximo pago” y el vencimiento futuro son estimaciones con tus propios datos; el banco no entrega esas cifras por adelantado.</li>' +
       '<li>Las compras no facturadas se asumen en 1 cuota: el listado del banco no indica si se pasaron a cuotas.</li>' +
       '<li>Las categorías son una clasificación automática por nombre de comercio; corrígelas cuando quieras.</li>' +
-      '<li>Funciona sin internet. Nada se envía a servidores; la única conexión es la sincronización opcional con tu propio script de Google (solo si la configuras).</li></ul><p class="sub">Versión 1.1 · pago único o en cuotas · datos solo locales.</p></section>';
+      '<li>Funciona sin internet. Nada se envía a servidores; la única conexión es la sincronización opcional con tu propio script de Google (solo si la configuras).</li></ul><p class="sub">Versión 1.3 · presupuesto por cuota · datos solo locales.</p></section>';
     UI.after(function () {
       var inp = UI.q('#bk-in'); if (inp) inp.addEventListener('change', function () { if (inp.files[0]) UI.restoreFile(inp.files[0]); inp.value = ''; });
       St.estimate().then(function (e) { var n = UI.q('#storage-use'); if (n) n.textContent = e && e.usage != null ? (e.usage / 1024 / 1024).toFixed(2) + ' MB de ' + (e.quota ? Math.round(e.quota / 1024 / 1024) + ' MB' : '—') : 'no disponible'; });
@@ -4012,10 +4033,10 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
   /** Compras de una categoría en el período, con acceso al detalle. */
   UI.acts.budcat = function (el) {
     var S = UI.state, M = S.model, cat = el.getAttribute('data-c'), per = currentPeriod(M, S).per;
-    var evs = E.spendIn(M, per.from, per.to).filter(function (e) { return e.cat === cat; });
+    var evs = E.budgetIn(M, per.from, per.to).filter(function (e) { return e.cat === cat; });
     var st = E.budgetStatus(M, per, budgets(S), S.bud.est), r = st.rows.filter(function (x) { return x.cat === cat; })[0];
     evs = S.bud.est === 'facturado' ? evs.filter(function (e) { return e.estado === 'facturado'; }) : S.bud.est === 'no' ? evs.filter(function (e) { return e.estado !== 'facturado'; }) : evs;
-    var rows = evs.slice(0, 60).map(function (e) { return '<tr><td>' + U.fmtDateShort(e.fecha) + '</td><td>' + U.esc(e.brand) + (e.estado === 'facturado' ? ' ' + UI.chip('Facturado', 'info', '') : ' ' + UI.chip('No facturado', 'warn', '')) + (e.tipo === 'cuotas' ? '<small>' + e.cuotaTot + ' cuotas (total de la compra)</small>' : '') + '</td><td class="num">' + $(e.monto) + '</td></tr>'; }).join('');
+    var rows = evs.slice(0, 60).map(function (e) { return '<tr><td>' + U.fmtDateShort(e.fecha) + '</td><td>' + U.esc(e.brand) + (e.estado === 'facturado' ? ' ' + UI.chip('Facturado', 'info', '') : ' ' + UI.chip('No facturado', 'warn', '')) + (e.de ? '<small>Cuota ' + e.cuota + ' de ' + e.de + ' · valor de la cuota</small>' : '') + '</td><td class="num">' + $(e.monto) + '</td></tr>'; }).join('');
     var h = '<div class="kv"><div><span>Presupuesto</span><b>' + (r.presupuesto ? U.clp(r.presupuesto) : 'Sin definir') + '</b></div><div><span>Gastado</span><b>' + U.clp(r.gastado) + '</b></div>' + (r.presupuesto ? '<div><span>' + (r.disponible >= 0 ? 'Disponible' : 'Excedido en') + '</span><b>' + U.clp(Math.abs(r.disponible)) + '</b></div>' : '') + '</div>' +
       (evs.length ? '<div class="tbl-wrap" style="margin-top:10px"><table class="calc">' + rows + '</table></div>' + (evs.length > 60 ? '<p class="sub">Se muestran 60 de ' + evs.length + '.</p>' : '') : '<p class="empty">Sin compras en esta categoría en el período.</p>') +
       '<div class="btn-row" style="margin-top:10px"><button class="btn" data-act="budgo" data-c="' + U.esc(cat) + '">Ver y editar en Movimientos</button></div>';
