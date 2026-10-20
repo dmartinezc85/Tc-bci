@@ -2273,7 +2273,7 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
 
   /** Abre el almacenamiento y carga los datos guardados. */
   S.open = function () {
-    return openIDB().then(function (d) {
+    return BCI.vault.ensureUnlocked().then(function () { return openIDB(); }).then(function (d) {
       db = d; S.mode = 'indexeddb';
       return new Promise(function (resolve, reject) {
         var tx = db.transaction(KV, 'readonly'), st = tx.objectStore(KV), out = emptyData(), n = 0;
@@ -2281,6 +2281,7 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
           var r = st.get(k);
           r.onsuccess = function () { if (r.result !== undefined) out[k] = r.result; n++; };
         });
+        var re = st.get('enc'); re.onsuccess = function () { if (re.result) out._enc = re.result; };
         tx.oncomplete = function () { resolve(out); };
         tx.onerror = function () { reject(tx.error); };
       });
@@ -2290,7 +2291,7 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
         var raw = g.localStorage.getItem(LS_KEY);
         S.mode = 'localstorage'; S.note = 'IndexedDB no disponible (' + (err && err.message) + '); se usa localStorage.';
         var d2 = emptyData();
-        if (raw) { var o = JSON.parse(raw); KEYS.forEach(function (k) { if (o[k] !== undefined) d2[k] = o[k]; }); }
+        if (raw) { var o = JSON.parse(raw); if (o.enc) d2._enc = o.enc; KEYS.forEach(function (k) { if (o[k] !== undefined) d2[k] = o[k]; }); }
         return d2;
       } catch (e2) {
         S.mode = 'memoria'; S.note = 'Sin almacenamiento persistente: los datos se pierden al cerrar. Exporta un respaldo.';
@@ -2300,12 +2301,32 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
       if (S.mode === 'indexeddb' && g.navigator && navigator.storage && navigator.storage.persist) {
         try { navigator.storage.persist().then(function (p) { S.persistent = !!p; }); } catch (e) { /* opcional */ }
       }
+      if (data && data._enc) { var enc0 = data._enc; delete data._enc; return BCI.vault.open(enc0).then(function (txt) { var o = JSON.parse(txt), d = emptyData(); KEYS.forEach(function (k) { if (o[k] !== undefined) d[k] = o[k]; }); return d; }); }
       return data;
     });
   };
 
   /** Guarda TODOS los datos en una sola transacción atómica. */
+  /** Con contraseña activa: todo se guarda como un solo bloque cifrado y se borran las claves en claro. */
+  function encryptedSave(data) {
+    var o = {}; KEYS.forEach(function (k) { o[k] = data[k]; });
+    return BCI.vault.seal(JSON.stringify(o)).then(function (c) {
+      if (S.mode === 'indexeddb') {
+        return new Promise(function (resolve, reject) {
+          var tx = db.transaction(KV, 'readwrite'), st = tx.objectStore(KV);
+          st.put(c, 'enc'); KEYS.forEach(function (k) { st.delete(k); });
+          tx.oncomplete = function () { resolve(); };
+          tx.onerror = function () { reject(tx.error || new Error('Error al guardar')); };
+          tx.onabort = function () { reject(tx.error || new Error('Guardado cancelado')); };
+        });
+      }
+      if (S.mode === 'localstorage') { g.localStorage.setItem(LS_KEY, JSON.stringify({ enc: c })); return; }
+      mem = data;
+    });
+  }
+
   S.save = function (data) {
+    if (BCI.vault && BCI.vault.active()) return encryptedSave(data);
     if (S.mode === 'indexeddb') {
       return new Promise(function (resolve, reject) {
         var tx = db.transaction(KV, 'readwrite'), st = tx.objectStore(KV);
@@ -3810,7 +3831,7 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
       '<li>El “próximo pago” y el vencimiento futuro son estimaciones con tus propios datos; el banco no entrega esas cifras por adelantado.</li>' +
       '<li>Las compras no facturadas se asumen en 1 cuota: el listado del banco no indica si se pasaron a cuotas.</li>' +
       '<li>Las categorías son una clasificación automática por nombre de comercio; corrígelas cuando quieras.</li>' +
-      '<li>Funciona sin internet. Nada se envía a servidores; la única conexión es la sincronización opcional con tu propio script de Google (solo si la configuras).</li></ul><p class="sub">Versión 1.5 · sin avisos duplicados · datos solo locales.</p></section>';
+      '<li>Funciona sin internet. Nada se envía a servidores; la única conexión es la sincronización opcional con tu propio script de Google (solo si la configuras).</li></ul><p class="sub">Versión 1.6 · contraseña y datos cifrados · datos solo locales.</p></section>';
     UI.after(function () {
       var inp = UI.q('#bk-in'); if (inp) inp.addEventListener('change', function () { if (inp.files[0]) UI.restoreFile(inp.files[0]); inp.value = ''; });
       St.estimate().then(function (e) { var n = UI.q('#storage-use'); if (n) n.textContent = e && e.usage != null ? (e.usage / 1024 / 1024).toFixed(2) + ' MB de ' + (e.quota ? Math.round(e.quota / 1024 / 1024) + ' MB' : '—') : 'no disponible'; });
@@ -3827,8 +3848,8 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
 
   UI.acts.backupexport = function () {
     var d = UI.state.data;
-    var b = St.makeBackup(d), blob = new Blob([JSON.stringify(b)], { type: 'application/json' });
-    UI.download(St.makeBackupFileName(), blob);
+    var b = St.makeBackup(d);
+    BCI.vault.wrap(JSON.stringify(b)).then(function (txt) { UI.download(St.makeBackupFileName(), new Blob([txt], { type: 'application/json' })); });
     UI.patchSettings({ lastBackupAt: new Date().toISOString() }, 'Respaldo exportado (' + b.counts.movements + ' movimientos). Guárdalo en un lugar seguro.');
   };
 
@@ -3836,13 +3857,14 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
     file.text().then(UI.restoreText).catch(function (err) { UI.toast('No se pudo leer el archivo: ' + err.message, 'err'); });
   };
   UI.acts.backupcopy = function () {
-    var txt = JSON.stringify(St.makeBackup(UI.state.data));
+    BCI.vault.wrap(JSON.stringify(St.makeBackup(UI.state.data))).then(function (txt) {
     function manual() {
       UI.sheet({ title: 'Copia el respaldo', html: '<p>Selecciona todo el texto y cópialo (el permiso de copiar automático no está disponible aquí).</p><textarea id="bk-out" readonly style="min-height:160px;font-size:12px"></textarea>', after: function (ov) { var t = UI.q('#bk-out', ov); t.value = txt; t.focus(); t.select(); } });
     }
     try {
       navigator.clipboard.writeText(txt).then(function () { UI.patchSettings({ lastBackupAt: new Date().toISOString() }, 'Respaldo copiado como texto. Pégalo en una nota o correo para guardarlo.'); }, manual);
     } catch (e) { manual(); }
+  });
   };
   UI.acts.backuppaste = function () {
     UI.sheet({ title: 'Restaurar pegando el respaldo', html: '<p>Pega aquí el texto completo del respaldo.</p><textarea id="bk-paste" style="min-height:160px;font-size:12px" placeholder="{&quot;app&quot;:&quot;control-financiero-bci&quot;…"></textarea><div class="btn-row" style="margin-top:10px;justify-content:flex-end"><button class="btn" data-close>Cancelar</button><button class="btn primary" data-act="backuppasteok">Validar y restaurar</button></div>' });
@@ -3851,7 +3873,8 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
     var sh = el.closest('.sheet'), txt = UI.q('#bk-paste', sh).value; sh.parentNode.close(); UI.restoreText(txt);
   };
   UI.restoreText = function (txt) {
-    Promise.resolve(txt).then(function (txt) {
+    BCI.vault.unwrap(txt).catch(function (e) { UI.toast(e.message, 'err', 9000); return null; }).then(function (txt) {
+      if (txt === null) return;
       var res = St.parseBackup(txt);
       if (!res.ok) {
         UI.sheet({ title: 'No se puede restaurar este respaldo', html: '<p>El archivo no pasó la validación. <b>No se modificó ningún dato.</b></p><ul>' + res.errores.map(function (e) { return '<li>' + U.esc(e) + '</li>'; }).join('') + '</ul>' });
@@ -4095,6 +4118,171 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
   UI.acts.pendsee = function (el) { UI.drill({ brand: el.getAttribute('data-brand') }); };
 })(typeof window !== 'undefined' ? window : globalThis);
 
+/* ---------- 31-vault.js ---------- */
+/* =====================================================================
+ * 31-vault.js — Contraseña y cifrado de los datos (etapa 1).
+ * PBKDF2-SHA256 (600.000 iteraciones) deriva una clave AES-256-GCM que no puede exportarse.
+ * Los movimientos, estados, configuración de Gmail y respaldos quedan cifrados en el navegador.
+ * La contraseña no se guarda: solo un valor de verificación cifrado.
+ * Recuperación por Gmail: etapa 2.
+ * ===================================================================== */
+(function (g) {
+  'use strict';
+  var BCI = g.BCI = g.BCI || {};
+  var V = BCI.vault = {};
+  var META = 'tc-bci:vault:v1', FAILS = 'tc-bci:vault:fails', ITER = 600000, OK = 'tc-bci-ok';
+  var enc = new TextEncoder(), dec = new TextDecoder();
+  var hooks = [];
+  V.key = null; V.id = null;
+
+  function b64(bytes) { var s = ''; for (var i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]); return g.btoa(s); }
+  function unb64(str) { var s = g.atob(str), out = new Uint8Array(s.length); for (var i = 0; i < s.length; i++) out[i] = s.charCodeAt(i); return out; }
+  function meta() { try { return JSON.parse(g.localStorage.getItem(META) || 'null'); } catch (e) { return null; } }
+  function fails() { try { return JSON.parse(g.localStorage.getItem(FAILS) || '{"n":0,"until":0}'); } catch (e) { return { n: 0, until: 0 }; } }
+  function esc(t) { return String(t).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
+
+  V.exists = function () { return !!meta(); };
+  V.active = function () { return !!V.key; };
+  V.onUnlock = function (fn) { hooks.push(fn); if (V.key) fn(); };
+
+  function derive(pass, salt, iter) {
+    return g.crypto.subtle.importKey('raw', enc.encode(pass), 'PBKDF2', false, ['deriveKey']).then(function (base) {
+      return g.crypto.subtle.deriveKey({ name: 'PBKDF2', salt: salt, iterations: iter, hash: 'SHA-256' }, base,
+        { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+    });
+  }
+  /** Cifra texto con la clave activa. Resultado: base64(iv + cifrado). */
+  V.seal = function (text) {
+    var iv = g.crypto.getRandomValues(new Uint8Array(12));
+    return g.crypto.subtle.encrypt({ name: 'AES-GCM', iv: iv }, V.key, enc.encode(text)).then(function (ct) {
+      var all = new Uint8Array(12 + ct.byteLength); all.set(iv, 0); all.set(new Uint8Array(ct), 12);
+      return b64(all);
+    });
+  };
+  /** Descifra con la clave activa (o la indicada). */
+  V.open = function (str, key) {
+    var all = unb64(str);
+    return g.crypto.subtle.decrypt({ name: 'AES-GCM', iv: all.slice(0, 12) }, key || V.key, all.slice(12))
+      .then(function (pt) { return dec.decode(pt); });
+  };
+
+  function activate(key, m) { V.key = key; V.id = m.id; hooks.forEach(function (fn) { try { fn(); } catch (e) { /* ignorar */ } }); }
+
+  V.create = function (pass) {
+    if (V.exists()) return Promise.reject(new Error('Ya existe una contraseña.'));
+    if (!pass || pass.length < 8) return Promise.reject(new Error('Usa al menos 8 caracteres.'));
+    var salt = g.crypto.getRandomValues(new Uint8Array(16));
+    return derive(pass, salt, ITER).then(function (key) {
+      V.key = key;
+      var m = { v: 1, iter: ITER, salt: b64(salt), id: b64(g.crypto.getRandomValues(new Uint8Array(6))) };
+      return V.seal(OK).then(function (chk) {
+        m.check = chk; g.localStorage.setItem(META, JSON.stringify(m)); activate(key, m);
+      });
+    });
+  };
+
+  V.unlock = function (pass) {
+    var m = meta();
+    if (!m) return Promise.reject(new Error('No hay contraseña creada.'));
+    var wait = fails().until - Date.now();
+    if (wait > 0) return Promise.reject(new Error('Espera ' + Math.ceil(wait / 1000) + ' s antes de intentar de nuevo.'));
+    function fail() {
+      var n = fails().n + 1, lock = n >= 5 ? Math.min(15 * 60000, 30000 * Math.pow(2, n - 5)) : 0;
+      g.localStorage.setItem(FAILS, JSON.stringify({ n: n, until: lock ? Date.now() + lock : 0 }));
+      return Promise.reject(new Error('Contraseña incorrecta.' + (lock ? ' Espera ' + Math.round(lock / 1000) + ' s.' : '')));
+    }
+    return derive(pass, unb64(m.salt), m.iter)
+      .then(function (key) {
+        return V.open(m.check, key).then(function (t) { if (t !== OK) throw new Error('clave'); return key; });
+      })
+      .then(function (key) { g.localStorage.removeItem(FAILS); activate(key, m); }, fail);
+  };
+
+  /** Envuelve un respaldo (texto) en un sobre cifrado. Sin contraseña activa devuelve el texto tal cual. */
+  V.wrap = function (text) {
+    if (!V.key) return Promise.resolve(text);
+    return V.seal(text).then(function (c) {
+      return JSON.stringify({ app: 'control-tarjeta-bci', encrypted: true, vault: V.id, data: c });
+    });
+  };
+  /** Abre un respaldo cifrado si corresponde a esta contraseña; los respaldos sin cifrar pasan igual. */
+  V.unwrap = function (text) {
+    var o = null; try { o = JSON.parse(text); } catch (e) { return Promise.resolve(text); }
+    if (!o || !o.encrypted) return Promise.resolve(text);
+    if (!V.key) return Promise.reject(new Error('Desbloquea la app para abrir este respaldo.'));
+    if (o.vault !== V.id) return Promise.reject(new Error('Este respaldo fue cifrado con otra contraseña y no se puede abrir aquí.'));
+    return V.open(o.data);
+  };
+
+  /* ------------------------------ Pantallas ------------------------------ */
+  var BOX = 'width:100%;max-width:340px;background:#1e293b;border:1px solid #334155;border-radius:14px;padding:22px;box-sizing:border-box';
+  var IN = 'width:100%;box-sizing:border-box;padding:12px;border-radius:10px;border:1px solid #475569;background:#0f172a;color:#e2e8f0;font-size:16px;margin:6px 0 12px';
+  var BTN = 'width:100%;padding:12px;border:0;border-radius:10px;background:#1d4ed8;color:#fff;font-size:16px;font-weight:700';
+  var LBL = 'font-size:13px;color:#94a3b8';
+  function ov(html) {
+    var el = document.getElementById('vault-ov');
+    if (!el) {
+      el = document.createElement('div'); el.id = 'vault-ov';
+      el.setAttribute('style', 'position:fixed;inset:0;z-index:99999;background:#0f172a;color:#e2e8f0;display:flex;align-items:center;justify-content:center;padding:20px;font-family:system-ui,sans-serif;overflow:auto');
+      document.body.appendChild(el);
+    }
+    el.innerHTML = html; return el;
+  }
+  function close() { var el = document.getElementById('vault-ov'); if (el) el.remove(); }
+
+  function showLock(msg) {
+    var el = ov('<div style="' + BOX + '"><h2 style="margin:0 0 6px;font-size:20px">Control de tarjeta</h2>' +
+      '<p style="margin:0 0 10px;color:#94a3b8;font-size:14px">Ingresa tu contraseña para abrir la app.</p>' +
+      '<label style="' + LBL + '">Contraseña</label><input id="vault-p" type="password" autocomplete="current-password" style="' + IN + '">' +
+      '<div id="vault-msg" style="color:#fca5a5;font-size:14px;min-height:20px">' + esc(msg || '') + '</div>' +
+      '<button id="vault-go" style="' + BTN + '">Entrar</button>' +
+      '<p style="margin:14px 0 0;color:#64748b;font-size:12px">Tus datos están cifrados en este dispositivo.</p></div>');
+    var inp = el.querySelector('#vault-p'), btn = el.querySelector('#vault-go');
+    function go() {
+      btn.disabled = true;
+      V.unlock(inp.value).then(close, function (e) {
+        el.querySelector('#vault-msg').textContent = e.message; btn.disabled = false; inp.select();
+      });
+    }
+    btn.addEventListener('click', go);
+    inp.addEventListener('keydown', function (e) { if (e.key === 'Enter') go(); });
+    setTimeout(function () { inp.focus(); }, 50);
+  }
+
+  function showSetup() {
+    var el = ov('<div style="' + BOX + '"><h2 style="margin:0 0 6px;font-size:20px">Crea tu contraseña</h2>' +
+      '<p style="margin:0 0 10px;color:#94a3b8;font-size:14px">Protege tus datos en este dispositivo. Mínimo 8 caracteres. Sin ella no se puede abrir la app.</p>' +
+      '<label style="' + LBL + '">Contraseña</label><input id="vault-p1" type="password" autocomplete="new-password" style="' + IN + '">' +
+      '<label style="' + LBL + '">Repítela</label><input id="vault-p2" type="password" autocomplete="new-password" style="' + IN + '">' +
+      '<div id="vault-msg" style="color:#fca5a5;font-size:14px;min-height:20px"></div>' +
+      '<button id="vault-go" style="' + BTN + '">Guardar contraseña</button></div>');
+    var p1 = el.querySelector('#vault-p1'), p2 = el.querySelector('#vault-p2'), btn = el.querySelector('#vault-go');
+    function msg(m) { el.querySelector('#vault-msg').textContent = m; }
+    btn.addEventListener('click', function () {
+      if (p1.value.length < 8) return msg('Usa al menos 8 caracteres.');
+      if (p1.value !== p2.value) return msg('Las contraseñas no coinciden.');
+      btn.disabled = true;
+      V.create(p1.value)
+        .then(function () { return BCI.store.save(BCI.ui.state.data); })
+        .then(function () { close(); BCI.ui.toast('Contraseña creada. Tus datos ahora están cifrados.', 'ok', 6000); },
+              function (e) { btn.disabled = false; msg(e.message); });
+    });
+  }
+
+  /** Espera a que la contraseña esté activa (si ya existe una). Lo usa el almacenamiento al abrir. */
+  V.ensureUnlocked = function () {
+    if (V.key || !V.exists()) return Promise.resolve();
+    return new Promise(function (resolve) { V.onUnlock(resolve); showLock(); });
+  };
+
+  /* Si la app ya cargó y aún no hay contraseña, se pide crearla (y así se cifran los datos existentes). */
+  var t0 = setInterval(function () {
+    if (!BCI.ready) return;
+    clearInterval(t0);
+    if (!V.exists()) showSetup();
+  }, 300);
+})(typeof window !== 'undefined' ? window : globalThis);
+
 /* ---------- 60-sync.js ---------- */
 /* =====================================================================
  * 60-sync.js — Sincronización opcional con las notificaciones de uso de la tarjeta.
@@ -4122,15 +4310,35 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
 
   /* ------------------------------ Configuración ----------------------------- */
   function blank() { return { url: '', token: '', dias: 60, auto: true, last: null, lastInfo: null, lastError: null }; }
+  var cfgCache = null, CFG_ENC = 'tc-bci:sync:enc';
   Sy.getCfg = function () {
     var c = blank();
-    try { var o = JSON.parse(g.localStorage.getItem(KEY) || '{}'); Object.keys(c).forEach(function (k) { if (o[k] !== undefined) c[k] = o[k]; }); } catch (e) { /* sin almacenamiento */ }
+    if (cfgCache) Object.keys(c).forEach(function (k) { if (cfgCache[k] !== undefined) c[k] = cfgCache[k]; });
     return c;
   };
   Sy.setCfg = function (patch) {
     var c = Object.assign(Sy.getCfg(), patch);
-    try { g.localStorage.setItem(KEY, JSON.stringify(c)); return true; } catch (e) { return false; }
+    cfgCache = c;
+    if (BCI.vault && BCI.vault.active()) {
+      BCI.vault.seal(JSON.stringify(c)).then(function (x) { g.localStorage.setItem(CFG_ENC, x); }).catch(function () { /* se reintenta en el próximo cambio */ });
+    }
+    return true;
   };
+  /** Al desbloquear: carga la configuración cifrada; migra la versión anterior (sin cifrar) si existe. */
+  Sy.loadCfg = function () {
+    var raw = null, plain = null;
+    try { raw = g.localStorage.getItem(CFG_ENC); plain = g.localStorage.getItem(KEY); } catch (e) { /* sin almacenamiento */ }
+    if (raw) return BCI.vault.open(raw).then(function (t) { cfgCache = JSON.parse(t); }).catch(function () { cfgCache = null; });
+    if (plain) {
+      try { cfgCache = JSON.parse(plain); } catch (e) { cfgCache = null; }
+      return BCI.vault.seal(JSON.stringify(cfgCache || blank())).then(function (x) {
+        g.localStorage.setItem(CFG_ENC, x); g.localStorage.removeItem(KEY);
+      }).catch(function () { /* se mantiene en memoria */ });
+    }
+    return Promise.resolve();
+  };
+  BCI.vault.onUnlock(Sy.loadCfg);
+
   Sy.urlOk = function (u) { return /^https:\/\/script\.google\.com\/macros\/s\/[A-Za-z0-9_-]+\/exec$/.test(String(u || '').trim()); };
   Sy.tokenOk = function (t) { return /^[A-Za-z0-9_-]{16,}$/.test(String(t || '').trim()); };
   Sy.configured = function () { var c = Sy.getCfg(); return Sy.urlOk(c.url) && Sy.tokenOk(c.token); };
