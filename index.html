@@ -3810,7 +3810,7 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
       '<li>El “próximo pago” y el vencimiento futuro son estimaciones con tus propios datos; el banco no entrega esas cifras por adelantado.</li>' +
       '<li>Las compras no facturadas se asumen en 1 cuota: el listado del banco no indica si se pasaron a cuotas.</li>' +
       '<li>Las categorías son una clasificación automática por nombre de comercio; corrígelas cuando quieras.</li>' +
-      '<li>Funciona sin internet. Nada se envía a servidores; la única conexión es la sincronización opcional con tu propio script de Google (solo si la configuras).</li></ul><p class="sub">Versión 1.4 · sin avisos duplicados · datos solo locales.</p></section>';
+      '<li>Funciona sin internet. Nada se envía a servidores; la única conexión es la sincronización opcional con tu propio script de Google (solo si la configuras).</li></ul><p class="sub">Versión 1.5 · sin avisos duplicados · datos solo locales.</p></section>';
     UI.after(function () {
       var inp = UI.q('#bk-in'); if (inp) inp.addEventListener('change', function () { if (inp.files[0]) UI.restoreFile(inp.files[0]); inp.value = ''; });
       St.estimate().then(function (e) { var n = UI.q('#storage-use'); if (n) n.textContent = e && e.usage != null ? (e.usage / 1024 / 1024).toFixed(2) + ' MB de ' + (e.quota ? Math.round(e.quota / 1024 / 1024) + ' MB' : '—') : 'no disponible'; });
@@ -4191,7 +4191,7 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
       if (m.fecha <= cierre) { rep.facturados++; return; }
       var s = sig(m);
       var hit = base.filter(function (x) {
-        return !used[x.id] && x.fecha === m.fecha && Math.abs(x.monto) === Math.abs(m.monto) && x.tipo !== 'pago' && x.tipo !== 'cuota_nueva' && sig(x) === s;
+        return !used[x.id] && x.fecha === m.fecha && Math.abs(x.monto) === Math.abs(m.monto) && x.tipo !== 'pago' && x.tipo !== 'cuota_nueva' && Sy.sameMov(x, m);
       })[0];
       if (hit) { used[hit.id] = 1; rep.yaEstaban++; return; }
       add.push(m); rep.nuevos++;
@@ -4206,10 +4206,17 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
   Sy.sig = function (m) {
     return E.cleanDesc(m.desc, m.lugar).toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 5);
   };
+  /** Palabras del comercio de 4 letras o más (sin ciudad): "MAYORISTA 10 MAIPU 2" -> MAYORISTA, MAIPU. */
+  Sy.tokens = function (m) {
+    return E.cleanDesc(m.desc, m.lugar).toUpperCase().split(/[^A-Z0-9]+/).filter(function (t) { return t.length >= 4; });
+  };
+  /** Mismo movimiento: misma fecha y monto, y comercio igual o con alguna palabra en común. */
   Sy.sameMov = function (a, b) {
     if (a.fecha !== b.fecha || Math.abs(a.monto) !== Math.abs(b.monto)) return false;
     var x = Sy.sig(a), y = Sy.sig(b);
-    return !!x && x === y;
+    if (x && x === y) return true;
+    var tb = Sy.tokens(b);
+    return Sy.tokens(a).some(function (t) { return tb.indexOf(t) >= 0; });
   };
   /**
    * Quita los avisos de Gmail (notifId) que ya están cubiertos:
