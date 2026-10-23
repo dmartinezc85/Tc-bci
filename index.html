@@ -2307,6 +2307,25 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
   };
 
   /** Guarda TODOS los datos en una sola transacción atómica. */
+  S.kvGet = function (k) {
+    return openIDB().then(function (d) { return new Promise(function (res, rej) {
+      var tx = d.transaction(KV, 'readonly'), q = tx.objectStore(KV).get(k);
+      tx.oncomplete = function () { res(q.result === undefined ? null : q.result); }; tx.onerror = function () { rej(tx.error); };
+    }); });
+  };
+  S.kvPut = function (k, v) {
+    return openIDB().then(function (d) { return new Promise(function (res, rej) {
+      var tx = d.transaction(KV, 'readwrite'); tx.objectStore(KV).put(v, k);
+      tx.oncomplete = function () { res(); }; tx.onerror = function () { rej(tx.error); };
+    }); });
+  };
+  S.kvDel = function (k) {
+    return openIDB().then(function (d) { return new Promise(function (res, rej) {
+      var tx = d.transaction(KV, 'readwrite'); tx.objectStore(KV).delete(k);
+      tx.oncomplete = function () { res(); }; tx.onerror = function () { rej(tx.error); };
+    }); });
+  };
+
   /** Con contraseña activa: todo se guarda como un solo bloque cifrado y se borran las claves en claro. */
   function encryptedSave(data) {
     var o = {}; KEYS.forEach(function (k) { o[k] = data[k]; });
@@ -3831,7 +3850,7 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
       '<li>El “próximo pago” y el vencimiento futuro son estimaciones con tus propios datos; el banco no entrega esas cifras por adelantado.</li>' +
       '<li>Las compras no facturadas se asumen en 1 cuota: el listado del banco no indica si se pasaron a cuotas.</li>' +
       '<li>Las categorías son una clasificación automática por nombre de comercio; corrígelas cuando quieras.</li>' +
-      '<li>Funciona sin internet. Nada se envía a servidores; la única conexión es la sincronización opcional con tu propio script de Google (solo si la configuras).</li></ul><p class="sub">Versión 1.6 · contraseña y datos cifrados · datos solo locales.</p></section>';
+      '<li>Funciona sin internet. Nada se envía a servidores; la única conexión es la sincronización opcional con tu propio script de Google (solo si la configuras).</li></ul><p class="sub">Versión 1.6.1 · contraseña y datos cifrados · datos solo locales.</p></section>';
     UI.after(function () {
       var inp = UI.q('#bk-in'); if (inp) inp.addEventListener('change', function () { if (inp.files[0]) UI.restoreFile(inp.files[0]); inp.value = ''; });
       St.estimate().then(function (e) { var n = UI.q('#storage-use'); if (n) n.textContent = e && e.usage != null ? (e.usage / 1024 / 1024).toFixed(2) + ' MB de ' + (e.quota ? Math.round(e.quota / 1024 / 1024) + ' MB' : '—') : 'no disponible'; });
@@ -4161,6 +4180,7 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
   };
   /** Descifra con la clave activa (o la indicada). */
   V.open = function (str, key) {
+    if (!(key || V.key)) return Promise.reject(new Error('Desbloquea la app para continuar.'));
     var all = unb64(str);
     return g.crypto.subtle.decrypt({ name: 'AES-GCM', iv: all.slice(0, 12) }, key || V.key, all.slice(12))
       .then(function (pt) { return dec.decode(pt); });
@@ -4177,6 +4197,7 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
       var m = { v: 1, iter: ITER, salt: b64(salt), id: b64(g.crypto.getRandomValues(new Uint8Array(6))) };
       return V.seal(OK).then(function (chk) {
         m.check = chk; g.localStorage.setItem(META, JSON.stringify(m)); activate(key, m);
+        BCI.store.kvPut('vmeta', m).catch(function () { /* copia de respaldo opcional */ });
       });
     });
   };
@@ -4271,9 +4292,33 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
 
   /** Espera a que la contraseña esté activa (si ya existe una). Lo usa el almacenamiento al abrir. */
   V.ensureUnlocked = function () {
-    if (V.key || !V.exists()) return Promise.resolve();
-    return new Promise(function (resolve) { V.onUnlock(resolve); showLock(); });
+    if (V.key) return Promise.resolve();
+    var pre = V.exists() ? Promise.resolve() : restoreMeta();
+    return pre.then(function () {
+      if (!V.exists()) return orphanCheck();
+      return new Promise(function (resolve) { V.onUnlock(resolve); showLock(); });
+    });
   };
+  function restoreMeta() {
+    return BCI.store.kvGet('vmeta').then(function (m) { if (m) g.localStorage.setItem(META, JSON.stringify(m)); }, function () {});
+  }
+  /** Hay datos cifrados pero se perdió la contraseña de este navegador: no se pueden abrir. */
+  function orphanCheck() {
+    return BCI.store.kvGet('enc').then(function (enc) {
+      if (!enc) return;
+      return new Promise(function (resolve) { showOrphan(resolve); });
+    }, function () {});
+  }
+  function showOrphan(done) {
+    var el = ov('<div style="' + BOX + '"><h2 style="margin:0 0 6px;font-size:20px">No encontramos tu contraseña</h2>' +
+      '<p style="margin:0 0 10px;color:#94a3b8;font-size:14px">Tus datos cifrados siguen en este navegador, pero se perdió la clave para abrirlos (suele pasar al borrar los datos del sitio o al cambiar de navegador).</p>' +
+      '<p style="margin:0 0 14px;color:#94a3b8;font-size:14px">Sin la contraseña no es posible abrirlos. Si tienes un respaldo sin cifrar de antes de la versión 1.6, podrás restaurarlo después de empezar de cero.</p>' +
+      '<button id="vault-reset" style="' + BTN + ';background:#b91c1c">Empezar de cero</button></div>');
+    el.querySelector('#vault-reset').addEventListener('click', function () {
+      if (!g.confirm('¿Empezar de cero? Los datos cifrados de este navegador se borrarán.')) return;
+      BCI.store.kvDel('enc').then(function () { close(); done(); }, function () { done(); });
+    });
+  }
 
   /* Si la app ya cargó y aún no hay contraseña, se pide crearla (y así se cifran los datos existentes). */
   var t0 = setInterval(function () {
