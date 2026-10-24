@@ -3850,7 +3850,7 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
       '<li>El “próximo pago” y el vencimiento futuro son estimaciones con tus propios datos; el banco no entrega esas cifras por adelantado.</li>' +
       '<li>Las compras no facturadas se asumen en 1 cuota: el listado del banco no indica si se pasaron a cuotas.</li>' +
       '<li>Las categorías son una clasificación automática por nombre de comercio; corrígelas cuando quieras.</li>' +
-      '<li>Funciona sin internet. Nada se envía a servidores; la única conexión es la sincronización opcional con tu propio script de Google (solo si la configuras).</li></ul><p class="sub">Versión 1.6.1 · contraseña y datos cifrados · datos solo locales.</p></section>';
+      '<li>Funciona sin internet. Nada se envía a servidores; la única conexión es la sincronización opcional con tu propio script de Google (solo si la configuras).</li></ul><p class="sub">Versión 1.6.2 · contraseña y datos cifrados · datos solo locales.</p></section>';
     UI.after(function () {
       var inp = UI.q('#bk-in'); if (inp) inp.addEventListener('change', function () { if (inp.files[0]) UI.restoreFile(inp.files[0]); inp.value = ''; });
       St.estimate().then(function (e) { var n = UI.q('#storage-use'); if (n) n.textContent = e && e.usage != null ? (e.usage / 1024 / 1024).toFixed(2) + ' MB de ' + (e.quota ? Math.round(e.quota / 1024 / 1024) + ' MB' : '—') : 'no disponible'; });
@@ -4688,6 +4688,22 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
     }
     UI.patchSettings({ nfPlans: plans }, f.modo === 'unico' ? 'Marcado como pago único.' : 'Forma de pago guardada.')
       .then(function () { sh.parentNode.close(); }, function () {});
+  };
+})(typeof window !== 'undefined' ? window : globalThis);
+
+/* ---------- 63-vault-id.js ---------- */
+/* Muestra en Configuración el identificador de la contraseña activa, para saber si un respaldo puede abrirse aquí. */
+(function (g) {
+  'use strict';
+  var BCI = g.BCI;
+  if (!BCI || !BCI.ui || !BCI.vault) return;
+  var UI = BCI.ui, prevCfg = UI.views.config;
+  UI.views.config = function (M, S) {
+    var h = prevCfg(M, S);
+    var id = BCI.vault.id || 'sin contraseña';
+    return h + '<section class="card" id="vault-id-card"><header><div><h2>Identificador de contraseña</h2>' +
+      '<div class="sub" style="font-family:monospace;font-size:16px;letter-spacing:1px">' + BCI.util.esc(id) + '</div></div></header>' +
+      '<p class="sub" style="margin:0">Compara este código con el campo "vault" del archivo de respaldo. Si coinciden, el respaldo se puede abrir en este navegador.</p></section>';
   };
 })(typeof window !== 'undefined' ? window : globalThis);
 
