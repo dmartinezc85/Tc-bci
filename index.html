@@ -3850,7 +3850,7 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
       '<li>El “próximo pago” y el vencimiento futuro son estimaciones con tus propios datos; el banco no entrega esas cifras por adelantado.</li>' +
       '<li>Las compras no facturadas se asumen en 1 cuota: el listado del banco no indica si se pasaron a cuotas.</li>' +
       '<li>Las categorías son una clasificación automática por nombre de comercio; corrígelas cuando quieras.</li>' +
-      '<li>Funciona sin internet. Nada se envía a servidores; la única conexión es la sincronización opcional con tu propio script de Google (solo si la configuras).</li></ul><p class="sub">Versión 1.6.2 · contraseña y datos cifrados · datos solo locales.</p></section>';
+      '<li>Funciona sin internet. Nada se envía a servidores; la única conexión es la sincronización opcional con tu propio script de Google (solo si la configuras).</li></ul><p class="sub">Versión 1.7 · resumen de próxima facturación · datos solo locales. · datos solo locales.</p></section>';
     UI.after(function () {
       var inp = UI.q('#bk-in'); if (inp) inp.addEventListener('change', function () { if (inp.files[0]) UI.restoreFile(inp.files[0]); inp.value = ''; });
       St.estimate().then(function (e) { var n = UI.q('#storage-use'); if (n) n.textContent = e && e.usage != null ? (e.usage / 1024 / 1024).toFixed(2) + ' MB de ' + (e.quota ? Math.round(e.quota / 1024 / 1024) + ' MB' : '—') : 'no disponible'; });
@@ -4704,6 +4704,65 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
     return h + '<section class="card" id="vault-id-card"><header><div><h2>Identificador de contraseña</h2>' +
       '<div class="sub" style="font-family:monospace;font-size:16px;letter-spacing:1px">' + BCI.util.esc(id) + '</div></div></header>' +
       '<p class="sub" style="margin:0">Compara este código con el campo "vault" del archivo de respaldo. Si coinciden, el respaldo se puede abrir en este navegador.</p></section>';
+  };
+})(typeof window !== 'undefined' ? window : globalThis);
+
+/* ---------- 64-presup-proxima.js ---------- */
+/* Resumen por categoría de lo que se facturará en el próximo cierre (compras no facturadas
+ * + 1ª cuota de cada compra en cuotas) y del saldo de cuotas vigentes que queda por pagar después. */
+(function (g) {
+  'use strict';
+  var BCI = g.BCI;
+  if (!BCI || !BCI.ui || !BCI.engine) return;
+  var E = BCI.engine, U = BCI.util, UI = BCI.ui;
+
+  E.resumenProxima = function (M) {
+    var filas = {};
+    function fila(c) { c = c || 'Revisar'; return filas[c] || (filas[c] = { cat: c, proxima: 0, saldo: 0, planes: 0 }); }
+    M.movs.forEach(function (m) {
+      if (m.estado !== 'no_facturado' || (m.tipo !== 'compra' && m.tipo !== 'cargo' && m.tipo !== 'devolucion')) return;
+      var f = fila(m.cat);
+      f.proxima += m.nfPlan ? m.nfPlan.valor : m.monto;
+      if (m.nfPlan) { f.saldo += m.nfPlan.valor * (m.nfPlan.n - 1); f.planes++; }
+    });
+    (M.plans || []).forEach(function (p) {
+      if (!(p.estado === 'vigente' || p.estado === 'nueva')) return;
+      var f = fila(p.cat);
+      f.proxima += p.valor;
+      f.saldo += p.valor * Math.max(0, p.pendientes - 1);
+      f.planes++;
+    });
+    var lista = Object.keys(filas).map(function (k) { return filas[k]; })
+      .filter(function (f) { return f.proxima || f.saldo; })
+      .sort(function (a, b) { return b.proxima - a.proxima; });
+    var total = lista.reduce(function (a, f) { return a + f.proxima; }, 0);
+    var saldo = lista.reduce(function (a, f) { return a + f.saldo; }, 0);
+    var np = M.nextPayment && M.nextPayment.comp || [];
+    var esperado = 0;
+    np.forEach(function (c) { if (c.id === 'nofact' || c.id === 'cuotas') esperado += c.monto || 0; });
+    return { filas: lista, total: total, saldo: saldo, esperado: esperado, arrastre: (np.filter(function (c) { return c.id === 'arrastre'; })[0] || {}).monto || 0 };
+  };
+
+  var prev = UI.views.presupuesto;
+  UI.views.presupuesto = function (M, S) {
+    var h = prev(M, S);
+    var r = E.resumenProxima(M);
+    if (!r.filas.length) return h;
+    var filas = r.filas.map(function (f) {
+      return '<tr><td style="padding:6px 4px">' + U.esc(f.cat) + '</td>' +
+        '<td style="padding:6px 4px;text-align:right">' + U.clp(f.proxima) + '</td>' +
+        '<td style="padding:6px 4px;text-align:right">' + (f.saldo ? U.clp(f.saldo) : '—') + '</td></tr>';
+    }).join('');
+    var card = '<section class="card" id="prox-card"><header><div><h2>Próxima facturación por categoría</h2>' +
+      '<div class="sub">Compras no facturadas + 1ª cuota de cada compra en cuotas, y el saldo de cuotas que queda después.</div></div></header>' +
+      '<table style="width:100%;border-collapse:collapse;font-size:14px"><thead><tr style="color:#94a3b8;font-size:12px;text-align:left">' +
+      '<th style="padding:4px">Categoría</th><th style="padding:4px;text-align:right">Próxima facturación</th><th style="padding:4px;text-align:right">Cuotas por pagar después</th></tr></thead>' +
+      '<tbody>' + filas + '</tbody>' +
+      '<tfoot><tr style="font-weight:700;border-top:1px solid #334155"><td style="padding:8px 4px">Total</td>' +
+      '<td style="padding:8px 4px;text-align:right">' + U.clp(r.total) + '</td><td style="padding:8px 4px;text-align:right">' + U.clp(r.saldo) + '</td></tr></tfoot></table>' +
+      (r.arrastre ? '<p class="sub" style="margin:8px 0 0">Además, hay un saldo pendiente del estado anterior de ' + U.clp(r.arrastre) + ', que no está incluido aquí.</p>' : '') +
+      '</section>';
+    return card + h;
   };
 })(typeof window !== 'undefined' ? window : globalThis);
 
