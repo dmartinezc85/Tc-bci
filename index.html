@@ -1515,16 +1515,20 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
       return e.estado === 'por_facturar' && !e.parcial && e.fecha > per.to && (incDeuda || !e.deuda);
     });
     var byFut = E.sumBy(futEv, function (e) { return e.cat; });
+    // Próxima facturación: no facturado + cuota de cada compra vigente (no las cuotas de meses posteriores).
+    var nx = estado === 'facturado' ? null : E.resumenProxima(M);
+    var byP = {}, byNF = {}, byC = {};
+    if (nx) nx.filas.forEach(function (f) { byP[f.cat] = f.proxima; byNF[f.cat] = f.noFact; byC[f.cat] = f.cuotas; });
     var cnt = U.groupBy(evs, function (e) { return e.cat; });
     // El ritmo se mide sobre per.ritmo si existe (p. ej. la vista "no facturado" abarca más fechas que el ciclo abierto).
     var rp = per.ritmo || per, cur = M.asOf >= rp.from && M.asOf <= rp.to;
     var daysTotal = U.daysBetween(rp.from, rp.to) + 1;
     var elapsed = cur ? U.daysBetween(rp.from, M.asOf) + 1 : (M.asOf > rp.to ? daysTotal : 0);
     var rows = E.BUDGET_CATS.map(function (c) {
-      var b = Math.max(0, +budgets[c] || 0), fu = Math.round(byFut[c] || 0), s = Math.round((by[c] || 0) + (byFut[c] || 0));
+      var b = Math.max(0, +budgets[c] || 0), fu = Math.round(nx ? (byC[c] || 0) : (byFut[c] || 0)), s = Math.round(nx ? (byP[c] || 0) : ((by[c] || 0) + (byFut[c] || 0)));
       var estado = b <= 0 ? 'sin' : s > b ? 'excede' : s >= 0.8 * b ? 'cerca' : 'ok';
       var proy = (cur && b > 0 && elapsed >= 5) ? Math.round(s / elapsed * daysTotal) : null;
-      return { cat: c, presupuesto: b, gastado: s, fact: Math.round(byF[c] || 0), nofact: Math.round(byN[c] || 0), futuro: fu, n: (cnt[c] || []).length, disponible: b - s, pct: b > 0 ? s / b : null, estado: estado, proy: proy, ritmoAlto: proy != null && proy > b && estado !== 'excede' };
+      return { cat: c, presupuesto: b, gastado: s, fact: nx ? 0 : Math.round(byF[c] || 0), nofact: nx ? Math.round(byNF[c] || 0) : Math.round(byN[c] || 0), futuro: fu, n: (cnt[c] || []).length, disponible: b - s, pct: b > 0 ? s / b : null, estado: estado, proy: proy, ritmoAlto: proy != null && proy > b && estado !== 'excede' };
     });
     var conP = rows.filter(function (r) { return r.presupuesto > 0; });
     var totalP = U.sum(conP, function (r) { return r.presupuesto; }), gastoP = U.sum(conP, function (r) { return r.gastado; });
@@ -3856,7 +3860,7 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
       '<li>El “próximo pago” y el vencimiento futuro son estimaciones con tus propios datos; el banco no entrega esas cifras por adelantado.</li>' +
       '<li>Las compras no facturadas se asumen en 1 cuota: el listado del banco no indica si se pasaron a cuotas.</li>' +
       '<li>Las categorías son una clasificación automática por nombre de comercio; corrígelas cuando quieras.</li>' +
-      '<li>Funciona sin internet. Nada se envía a servidores; la única conexión es la sincronización opcional con tu propio script de Google (solo si la configuras).</li></ul><p class="sub">Versión 1.7.1 · cuotas vigentes en presupuesto · datos solo locales. · datos solo locales.</p></section>';
+      '<li>Funciona sin internet. Nada se envía a servidores; la única conexión es la sincronización opcional con tu propio script de Google (solo si la configuras).</li></ul><p class="sub">Versión 1.7.2 · próxima facturación en presupuesto · datos solo locales. · datos solo locales.</p></section>';
     UI.after(function () {
       var inp = UI.q('#bk-in'); if (inp) inp.addEventListener('change', function () { if (inp.files[0]) UI.restoreFile(inp.files[0]); inp.value = ''; });
       St.estimate().then(function (e) { var n = UI.q('#storage-use'); if (n) n.textContent = e && e.usage != null ? (e.usage / 1024 / 1024).toFixed(2) + ' MB de ' + (e.quota ? Math.round(e.quota / 1024 / 1024) + ' MB' : '—') : 'no disponible'; });
@@ -4014,7 +4018,7 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
       var foot = r.estado === 'sin' ? (r.gastado ? 'Sin presupuesto definido' : 'Sin gasto en el período') : (r.disponible >= 0 ? 'Disponible ' + U.clp(r.disponible) : 'Excedido en ' + U.clp(-r.disponible));
       if (r.ritmoAlto) foot += ' · a este ritmo llegarías a ' + U.clp(r.proy);
       return '<button type="button" class="card bud-cat" data-act="budcat" data-c="' + U.esc(r.cat) + '"><span class="bud-cat-top"><b><span class="sw" style="background:' + UI.catColor(r.cat) + ';margin-right:7px"></span>' + U.esc(r.cat) + '</b>' + UI.chip(r.ritmoAlto ? 'Ritmo alto' : e[0], r.ritmoAlto ? 'warn' : e[1]) + '</span>' +
-        '<span class="bud-amt">' + $(r.gastado) + (r.presupuesto ? ' <small>de ' + $(r.presupuesto) + '</small>' : '') + '</span>' + bar(r.pct, r.estado) + '<span class="sub">' + U.esc(foot) + ' · ' + r.n + ' compra(s)</span>' + (r.futuro ? '<span class="sub">Incluye cuotas vigentes de meses siguientes: ' + U.clp(r.futuro) + '</span>' : '') + (vista === 'todo' && (r.fact || r.nofact) ? '<span class="sub">Facturado ' + U.clp(r.fact) + ' · No facturado ' + U.clp(r.nofact) + '</span>' : '') + '</button>';
+        '<span class="bud-amt">' + $(r.gastado) + (r.presupuesto ? ' <small>de ' + $(r.presupuesto) + '</small>' : '') + '</span>' + bar(r.pct, r.estado) + '<span class="sub">' + U.esc(foot) + ' · ' + r.n + ' compra(s)</span>' + (r.futuro ? '<span class="sub">Cuotas vigentes de la próxima facturación: ' + U.clp(r.futuro) + '</span>' : '') + (vista === 'todo' && (r.fact || r.nofact) ? '<span class="sub">Facturado ' + U.clp(r.fact) + ' · No facturado ' + U.clp(r.nofact) + '</span>' : '') + '</button>';
     }).join('') + '</section>';
 
     // Sin categoría y fuera de presupuesto
@@ -4724,17 +4728,19 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
 
   E.resumenProxima = function (M) {
     var filas = {};
-    function fila(c) { c = c || 'Revisar'; return filas[c] || (filas[c] = { cat: c, proxima: 0, saldo: 0, planes: 0 }); }
+    function fila(c) { c = c || 'Revisar'; return filas[c] || (filas[c] = { cat: c, proxima: 0, saldo: 0, planes: 0, noFact: 0, cuotas: 0 }); }
     M.movs.forEach(function (m) {
       if (m.estado !== 'no_facturado' || (m.tipo !== 'compra' && m.tipo !== 'cargo' && m.tipo !== 'devolucion')) return;
       var f = fila(m.cat);
       f.proxima += m.nfPlan ? m.nfPlan.valor : m.monto;
+      if (m.nfPlan) f.cuotas += m.nfPlan.valor; else f.noFact += m.monto;
       if (m.nfPlan) { f.saldo += m.nfPlan.valor * (m.nfPlan.n - 1); f.planes++; }
     });
     (M.plans || []).forEach(function (p) {
       if (!(p.estado === 'vigente' || p.estado === 'nueva')) return;
       var f = fila(p.cat);
       f.proxima += p.valor;
+      f.cuotas += p.valor;
       f.saldo += p.valor * Math.max(0, p.pendientes - 1);
       f.planes++;
     });
